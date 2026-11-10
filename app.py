@@ -110,16 +110,19 @@ def extrair_valor_monetario_flex(texto):
 # ==========================================
 # 2. MOTOR DE LEITURA DE PDF
 # ==========================================
+
 def extrair_pdf_melhorado(arquivo, tipo_extrato):
     try:
+        # 1. Abre e extrai todo o texto do PDF
         doc = fitz.open(stream=arquivo.read(), filetype="pdf")
         texto_completo = ""
         for pag in doc:
             texto_completo += pag.get_text() + "\n"
         doc.close()
-        
-        linhas = texto_completo.split('\n')
-        
+
+        linhas = [linha.strip() for linha in texto_completo.split('\n') if linha.strip()]
+
+        # 2. Identificação da Conta
         conta_encontrada = "N/A"
         padroes_conta = [
             r"Conta:\s*(\d{4}\/\d{3,4}\/[\d\-]+)", 
@@ -129,7 +132,7 @@ def extrair_pdf_melhorado(arquivo, tipo_extrato):
             r"Agência.*?Conta.*?([\d\.\-]{5,})",            
             r"C\/C\s*[:\s]*([\d\.\-\/]+)"                 
         ]
-        
+
         for p in padroes_conta:
             match = re.search(p, texto_completo, re.IGNORECASE)
             if match:
@@ -137,108 +140,103 @@ def extrair_pdf_melhorado(arquivo, tipo_extrato):
                 if len(re.sub(r'\D', '', conta_raw)) > 4:
                     conta_encontrada = conta_raw
                     break
-        
+
         if conta_encontrada == "N/A":
             cabecalho = "\n".join(linhas[:25]) 
             match_solto = re.search(r"(\d{4,6}-\d)", cabecalho)
-            if match_solto: conta_encontrada = match_solto.group(1)
+            if match_solto:
+                conta_encontrada = match_solto.group(1)
 
         saldo_final = 0.0
         rendimento_total = 0.0
 
-        leu_rendimento_deste_fundo = False
+        # 3. Captura do Saldo Final
+        # Prioridade A: Busca exata pelo padrão "Saldo Atual =" (layout BB)
+        match_saldo_bb = re.search(
+            r"Saldo\s*Atual\s*=\s*[\r\n\s]*(-?\d{1,3}(?:\.\d{3})*,\d{2})",
+            texto_completo,
+            re.IGNORECASE
+        )
 
-        for i, linha in enumerate(linhas):
-            linha_upper = linha.upper().strip()
-            
-            # Identifica o início de um novo bloco de fundo/conta e reseta a trava
-            if "SALDO ANTERIOR" in linha_upper:
-                leu_rendimento_deste_fundo = False
-            
-           # --- 1. CAPTURA DE SALDO FINAL ---
-            # Removemos o "=" da lista de ignorados para permitir capturas como "Saldo Atual ="
-            gatilhos_saldo = ["SALDO ATUAL =", "SALDO ATUAL", "SALDO FINAL", "SALDO TOTAL", "SALDO LÍQUIDO", "SALDO BRUTO", "VALOR LIQUIDO", "TOTAL DISPONIVEL"]
+        if match_saldo_bb:
+            saldo_final = extrair_valor_monetario_flex(match_saldo_bb.group(1))
+        else:
+            # Prioridade B: Varredura de baixo para cima para ler o resumo antes do topo
+            gatilhos_saldo = [
+                "SALDO ATUAL", "SALDO FINAL", "SALDO TOTAL", "SALDO LÍQUIDO", 
+                "SALDO BRUTO", "VALOR LIQUIDO", "TOTAL DISPONIVEL", "TOTAL EM COTAS"
+            ]
             ignorar_saldo = ["ANTERIOR", "BLOQUEADO", "PROVISORIO", "RENTABILIDADE"]
-            
-            if any(g in linha_upper for g in gatilhos_saldo) and not any(ign in linha_upper for ign in ignorar_saldo):
-                v = 0.0
-                if re.search(r"\d", linha_upper):
-                    v = extrair_valor_monetario_flex(linha_upper)
-                
-                # Se o valor estiver quebrado nas linhas seguintes
-                if v == 0.0:
-                    for j in range(1, 5):
-                        if i + j < len(linhas):
-                            v_temp = extrair_valor_monetario_flex(linhas[i+j])
-                            if v_temp != 0.0:
-                                v = v_temp
-                                break
-                
-                # Atribuição direta em vez de somar (saldo_final += v),
-                # garantindo que o último saldo atualizado do extrato é o mantido.
-                if v != 0.0: 
-                    saldo_final = v  
-                    
-            # --- 2. CAPTURA DE RENDIMENTO (COM SOMA E LOOKAHEAD) ---
-            if tipo_extrato == 'INV' and not leu_rendimento_deste_fundo:
-                gatilhos_rend = ["RENDIMENTO BRUTO", "RENTABILIDADE", "RENDIMENTO NO MÊS", "RENDIMENTO LIQUIDO", "RENTAB."]
-                
+
+            for i in range(len(linhas) - 1, -1, -1):
+                linha_upper = linhas[i].upper()
+
+                if any(g in linha_upper for g in gatilhos_saldo) and not any(ign in linha_upper for ign in ignorar_saldo):
+                    if "RENDIMENTO" in linha_upper and "LÍQUIDO" not in linha_upper:
+                        continue
+
+                    v = 0.0
+                    if re.search(r"\d", linha_upper):
+                        v = extrair_valor_monetario_flex(linha_upper)
+
+                    if v == 0.0:
+                        for j in range(1, 4):
+                            if i + j < len(linhas):
+                                v_temp = extrair_valor_monetario_flex(linhas[i + j])
+                                if v_temp != 0.0:
+                                    v = v_temp
+                                    break
+
+                    if v != 0.0:
+                        saldo_final = v
+                        break
+
+        # 4. Captura de Rendimento (Investimentos)
+        if tipo_extrato == 'INV':
+            gatilhos_rend = [
+                "RENDIMENTO LÍQUIDO", "RENDIMENTO LIQUIDO", "RENDIMENTO NO MÊS",
+                "RENDIMENTO BRUTO", "RENTABILIDADE NO MÊS"
+            ]
+
+            for i, linha in enumerate(linhas):
+                linha_upper = linha.upper()
                 if any(g in linha_upper for g in gatilhos_rend) and "ACUMULADO" not in linha_upper and "ANO" not in linha_upper:
                     v = 0.0
                     if re.search(r"\d", linha_upper):
                         v = extrair_valor_monetario_flex(linha_upper)
-                        
+
                     if v == 0.0:
-                        for j in range(1, 5):
+                        for j in range(1, 4):
                             if i + j < len(linhas):
-                                v_temp = extrair_valor_monetario_flex(linhas[i+j])
+                                v_temp = extrair_valor_monetario_flex(linhas[i + j])
                                 if v_temp != 0.0:
                                     v = v_temp
                                     break
-                    
+
                     if v != 0.0 and abs(v) < 50000000:
-                         rendimento_total += v 
-                         leu_rendimento_deste_fundo = True
+                        rendimento_total = v
+                        break
 
-        # Trata PDFs zerados/sem movimento
+        # 5. Fallback para extratos sem movimentação
         if saldo_final == 0.0 and ("NAO HOUVE MOVIMENTO" in texto_completo.upper() or "SEM MOVIMENTO" in texto_completo.upper()):
-             match_ant = re.search(r"(?:SALDO ANTERIOR|SALDO).*?(\d{1,3}(?:\.\d{3})*,\d{2})", texto_completo, re.IGNORECASE | re.DOTALL)
-             if match_ant: saldo_final = extrair_valor_monetario_flex(match_ant.group(0))
-
-        if saldo_final == 0.0 and tipo_extrato == 'INV':
-            match_last = re.findall(r"(?:TOTAL|SALDO|ATUAL|LÍQUIDO).*?(-?\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)", texto_completo, re.IGNORECASE | re.DOTALL)
-            if match_last: saldo_final = extrair_valor_monetario_flex(match_last[-1])
+            match_ant = re.search(
+                r"(?:SALDO ANTERIOR|SALDO).*?(\d{1,3}(?:\.\d{3})*,\d{2})",
+                texto_completo,
+                re.IGNORECASE | re.DOTALL
+            )
+            if match_ant:
+                saldo_final = extrair_valor_monetario_flex(match_ant.group(0))
 
         texto_limpo = texto_completo[:300].replace('\n', ' ').replace(';', ',')
-        return {"Conta": conta_encontrada, "Saldo": saldo_final, "Rendimento": rendimento_total, "Texto_Raw": texto_limpo}
+        return {
+            "Conta": conta_encontrada,
+            "Saldo": saldo_final,
+            "Rendimento": rendimento_total,
+            "Texto_Raw": texto_limpo
+        }
+
     except Exception as e:
         return {"Conta": "Erro", "Saldo": 0.0, "Rendimento": 0.0, "Texto_Raw": str(e)}
-
-def carregar_depara():
-    import streamlit as st
-    
-    diretorio_atual = os.path.dirname(os.path.abspath(__file__))
-    caminho_arquivo = os.path.join(diretorio_atual, "depara", "DEPARA_CONTAS BANCÁRIAS_CEF.xlsx")
-    
-    try:
-        df_depara = pd.read_excel(caminho_arquivo, sheet_name="2025_JUNHO (2)", dtype=str, engine='openpyxl')
-        
-        if len(df_depara.columns) != 2:
-            df_depara = df_depara.iloc[:, :2]
-            
-        df_depara.columns = ['Conta Antiga', 'Conta Nova']
-        
-        df_depara['Chave Antiga'] = df_depara['Conta Antiga'].apply(gerar_chave_padronizada)
-        df_depara['Chave Nova'] = df_depara['Conta Nova'].apply(gerar_chave_padronizada)
-        
-        return df_depara
-        
-    except FileNotFoundError:
-        st.error(f"⚠️ O arquivo De-Para não foi encontrado neste caminho:\n{caminho_arquivo}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"⚠️ Erro ao tentar ler a planilha De-Para:\n{e}")
-        return pd.DataFrame()
 
 # ==========================================
 # 3. LEITURA CONTÁBIL
