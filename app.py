@@ -155,16 +155,17 @@ def extrair_pdf_melhorado(arquivo, tipo_extrato):
             if "SALDO ANTERIOR" in linha_upper:
                 leu_rendimento_deste_fundo = False
             
-            # --- 1. CAPTURA DE SALDO FINAL (COM SOMA E LOOKAHEAD) ---
-            gatilhos_saldo = ["SALDO FINAL", "SALDO TOTAL", "SALDO ATUAL", "SALDO EM", "SALDO LÍQUIDO", "SALDO BRUTO", "VALOR LIQUIDO", "TOTAL DISPONIVEL", "POSICAO EM", "TOTAL EM COTAS", "S A L D O"]
-            ignorar_saldo = ["ANTERIOR", "BLOQUEADO", "PROVISORIO", "RENDIMENTO", "RENTABILIDADE", "="]
+           # --- 1. CAPTURA DE SALDO FINAL ---
+            # Removemos o "=" da lista de ignorados para permitir capturas como "Saldo Atual ="
+            gatilhos_saldo = ["SALDO ATUAL =", "SALDO ATUAL", "SALDO FINAL", "SALDO TOTAL", "SALDO LÍQUIDO", "SALDO BRUTO", "VALOR LIQUIDO", "TOTAL DISPONIVEL"]
+            ignorar_saldo = ["ANTERIOR", "BLOQUEADO", "PROVISORIO", "RENTABILIDADE"]
             
             if any(g in linha_upper for g in gatilhos_saldo) and not any(ign in linha_upper for ign in ignorar_saldo):
                 v = 0.0
                 if re.search(r"\d", linha_upper):
                     v = extrair_valor_monetario_flex(linha_upper)
                 
-                # Se não achou na linha, caça o valor nas próximas 4 linhas! Resolve PDFs desconfigurados da Caixa
+                # Se o valor estiver quebrado nas linhas seguintes
                 if v == 0.0:
                     for j in range(1, 5):
                         if i + j < len(linhas):
@@ -173,8 +174,10 @@ def extrair_pdf_melhorado(arquivo, tipo_extrato):
                                 v = v_temp
                                 break
                 
+                # Atribuição direta em vez de somar (saldo_final += v),
+                # garantindo que o último saldo atualizado do extrato é o mantido.
                 if v != 0.0: 
-                    saldo_final += v  
+                    saldo_final = v  
                     
             # --- 2. CAPTURA DE RENDIMENTO (COM SOMA E LOOKAHEAD) ---
             if tipo_extrato == 'INV' and not leu_rendimento_deste_fundo:
